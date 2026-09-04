@@ -2,9 +2,10 @@ import os
 import json
 import time
 import requests
+from datetime import datetime, date
 
 # 1. Configuration
-API_KEY = "6bef1575-1b46-406a-9b5f-22c3678a2b72"
+API_KEY = os.getenv("POKEMON_TCG_API_KEY", "")
 BASE_URL = "https://api.pokemontcg.io/v2"
 OUTPUT_DIR = "api_data"
 
@@ -44,6 +45,17 @@ def fetch_all_sets():
 
 # 3. Fetch Cards & Prices for a Specific Set
 def fetch_set_data(set_id):
+    price_file = f"{OUTPUT_DIR}/prices/{set_id}_prices.json"
+    
+    # Check if the file exists and was modified today
+    if os.path.exists(price_file) and os.path.getsize(price_file) > 0:
+        modified_timestamp = os.path.getmtime(price_file)
+        modified_date = datetime.fromtimestamp(modified_timestamp).date()
+        
+        if modified_date == date.today():
+            print(f"Skipping {set_id}: Already updated today.")
+            return
+
     print(f"Processing set: {set_id}...")
     cards = []
     page = 1
@@ -129,10 +141,11 @@ def fetch_set_data(set_id):
 
 # 4. Main Execution
 if __name__ == "__main__":
-    # fetch_all_sets()
-    
-    # Test on modern sets
-    target_sets = ["sv1", "sv2", "sv3", "sv3pt5", "sv4", "sv5", "sv6", "sv7", "sv8"]
-    for s_id in target_sets:
+    # 1. Fetch all set IDs and save the manifest
+    all_set_ids = fetch_all_sets()
+    print(f"Discovered {len(all_set_ids)} total sets to download.")
+
+    # 2. Loop through EVERY set returned by the API
+    for s_id in all_set_ids:
         fetch_set_data(s_id)
-        time.sleep(1)
+        time.sleep(1)  # Courtesy delay between sets
