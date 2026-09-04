@@ -29,7 +29,7 @@ jobs:
         env:
           POKEMON_TCG_API_KEY: ${{ secrets.POKEMON_TCG_API_KEY }}
         run: |
-          python build_api_data.py
+          python pokemon_card_api.py
 
       - name: Commit and Push Changes
         run: |
