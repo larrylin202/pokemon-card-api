@@ -19,29 +19,71 @@ if API_KEY:
 os.makedirs(f"{OUTPUT_DIR}/sets", exist_ok=True)
 os.makedirs(f"{OUTPUT_DIR}/prices", exist_ok=True)
 
-# 2. Fetch All Sets Metadata (Paging sets endpoint prevents the 500 crash)
+# 2. Fetch All Sets Metadata (Resilient to 500 errors)
 def fetch_all_sets():
     print("Fetching all set metadata...")
-    response = requests.get(f"{BASE_URL}/sets?pageSize=250", headers=HEADERS)
-    response.raise_for_status()
-    sets = response.json().get("data", [])
+    manifest_path = f"{OUTPUT_DIR}/sets_manifest.json"
+    sets = []
     
-    manifest = [
-        {
-            "id": s["id"],
-            "name": s["name"],
-            "printedTotal": s["printedTotal"],
-            "total": s["total"],
-            "releaseDate": s.get("releaseDate", "")
-        }
-        for s in sets
-    ]
-    
-    with open(f"{OUTPUT_DIR}/sets_manifest.json", "w", encoding="utf-8") as f:
-        json.dump(manifest, f, indent=2)
-    
-    print(f"Saved {len(manifest)} sets to manifest.")
-    return [s["id"] for s in sets]
+    max_attempts = 5
+    backoff = 2.0
+
+    for attempt in range(1, max_attempts + 1):
+        try:
+            response = requests.get(
+                f"{BASE_URL}/sets?pageSize=250", 
+                headers=HEADERS, 
+                timeout=20
+            )
+            
+            if response.status_code == 200:
+                sets = response.json().get("data", [])
+                break
+            elif response.status_code in [429, 500, 502, 503, 504]:
+                print(f"Set metadata fetch busy ({response.status_code}). Retrying in {backoff}s (Attempt {attempt}/{max_attempts})...")
+                time.sleep(backoff)
+                backoff *= 1.5
+            else:
+                print(f"Unexpected HTTP {response.status_code} on sets endpoint.")
+                break
+        except requests.exceptions.RequestException as e:
+            print(f"Network error fetching sets ({type(e).__name__}). Retrying in {backoff}s...")
+            time.sleep(backoff)
+            backoff *= 1.5
+
+    # If the API gave us valid sets, write/update the local manifest
+    if sets:
+        manifest = [
+            {
+                "id": s["id"],
+                "name": s["name"],
+                "printedTotal": s["printedTotal"],
+                "total": s["total"],
+                "releaseDate": s.get("releaseDate", "")
+            }
+            for s in sets
+        ]
+        with open(manifest_path, "w", encoding="utf-8") as f:
+            json.dump(manifest, f, indent=2)
+        
+        print(f"Successfully saved {len(manifest)} sets to manifest.")
+        return [s["id"] for s in sets]
+
+    # Fallback: API failed, try loading the existing manifest already in the repo
+    print("Warning: Failed to fetch fresh sets metadata. Attempting fallback to existing manifest...")
+    if os.path.exists(manifest_path):
+        try:
+            with open(manifest_path, "r", encoding="utf-8") as f:
+                cached_manifest = json.load(f)
+            cached_ids = [s["id"] for s in cached_manifest if "id" in s]
+            print(f"Loaded {len(cached_ids)} set IDs from existing local manifest.")
+            return cached_ids
+        except Exception as e:
+            print(f"Failed to parse cached manifest: {e}")
+
+    # Ultimate fallback if no cache exists yet
+    print("No local manifest available. Falling back to default active sets.")
+    return ["sv1", "sv2", "sv3", "sv3pt5", "sv4", "sv4pt5", "sv5", "sv6", "sv6pt5", "sv7", "sv8", "sv8pt5"]
 
 # 3. Fetch Cards & Prices for a Specific Set
 def fetch_set_data(set_id):
