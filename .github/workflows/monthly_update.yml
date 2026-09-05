@@ -1,12 +1,13 @@
-name: Daily Card & Price Update
+name: Monthly Full Catalog Update
 
 on:
   schedule:
-    - cron: "0 4 * * *"
+    # Runs at 03:00 UTC on the 1st day of every month
+    - cron: "0 3 1 * *"
   workflow_dispatch:
 
 jobs:
-  update-data:
+  update-all-sets:
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -23,22 +24,22 @@ jobs:
       - name: Install Dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install requests
+          pip install requests python-dotenv
 
-      - name: Run Recent Sets Scraper
+      - name: Run Full Catalog Scraper
         env:
           POKEMON_TCG_API_KEY: ${{ secrets.POKEMON_TCG_API_KEY }}
         run: |
-          python daily_update.py
+          python pokemon_card_api.py
 
-      - name: Commit and Push Changes
+      - name: Commit and Push Full Catalog
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git add api_data/
+          git add -A
           if git diff --staged --quiet; then
-            echo "No changes detected today."
+            echo "No full catalog changes detected."
           else
-            git commit -m "Automated daily card & price update [skip ci]"
+            git commit -m "Automated monthly full catalog update [skip ci]"
             git push
           fi
