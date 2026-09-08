@@ -2,12 +2,14 @@ import os
 import json
 import time
 import requests
-from datetime import datetime, date
+from datetime import datetime, timezone
 
 # 1. Configuration
 API_KEY = os.getenv("POKEMON_TCG_API_KEY", "")
 BASE_URL = "https://api.pokemontcg.io/v2"
 OUTPUT_DIR = "api_data"
+TRACKER_FILE = f"{OUTPUT_DIR}/sync_tracker.json"
+CACHE_EXPIRY_HOURS = 24  # Force re-fetch after 24 hours
 
 HEADERS = {
     "User-Agent": "PokemonCardScanner/1.0",
@@ -18,6 +20,39 @@ if API_KEY:
 
 os.makedirs(f"{OUTPUT_DIR}/sets", exist_ok=True)
 os.makedirs(f"{OUTPUT_DIR}/prices", exist_ok=True)
+
+# Helper: Load and Save Sync Timestamps
+def load_sync_tracker():
+    if os.path.exists(TRACKER_FILE):
+        try:
+            with open(TRACKER_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return {}
+    return {}
+
+def save_sync_tracker(tracker):
+    with open(TRACKER_FILE, "w", encoding="utf-8") as f:
+        json.dump(tracker, f, indent=2)
+
+def is_set_stale(set_id, tracker):
+    price_file = f"{OUTPUT_DIR}/prices/{set_id}_prices.json"
+    set_file = f"{OUTPUT_DIR}/sets/{set_id}.json"
+
+    # If the output files don't exist, it's definitely stale
+    if not (os.path.exists(price_file) and os.path.exists(set_file)):
+        return True
+
+    last_synced_str = tracker.get(set_id)
+    if not last_synced_str:
+        return True
+
+    try:
+        last_synced = datetime.fromisoformat(last_synced_str)
+        elapsed_seconds = (datetime.now(timezone.utc) - last_synced).total_seconds()
+        return elapsed_seconds > (CACHE_EXPIRY_HOURS * 3600)
+    except Exception:
+        return True
 
 # 2. Fetch All Sets Metadata (Resilient to 500 errors)
 def fetch_all_sets():
@@ -86,22 +121,15 @@ def fetch_all_sets():
     return ["sv1", "sv2", "sv3", "sv3pt5", "sv4", "sv4pt5", "sv5", "sv6", "sv6pt5", "sv7", "sv8", "sv8pt5"]
 
 # 3. Fetch Cards & Prices for a Specific Set
-def fetch_set_data(set_id):
-    price_file = f"{OUTPUT_DIR}/prices/{set_id}_prices.json"
-    
-    # Check if the file exists and was modified today
-    if os.path.exists(price_file) and os.path.getsize(price_file) > 0:
-        modified_timestamp = os.path.getmtime(price_file)
-        modified_date = datetime.fromtimestamp(modified_timestamp).date()
-        
-        if modified_date == date.today():
-            print(f"Skipping {set_id}: Already updated today.")
-            return
+def fetch_set_data(set_id, tracker):
+    if not is_set_stale(set_id, tracker):
+        print(f"Skipping {set_id}: Updated within the last {CACHE_EXPIRY_HOURS} hours.")
+        return
 
     print(f"Processing set: {set_id}...")
     cards = []
     page = 1
-    page_size = 100  # <--- Changed from 250 to 100 to prevent API 500 timeouts
+    page_size = 100
 
     session = requests.Session()
     session.headers.update(HEADERS)
@@ -115,7 +143,6 @@ def fetch_set_data(set_id):
 
         for attempt in range(1, max_attempts + 1):
             try:
-                # Set a strict 15-second timeout so it never hangs indefinitely
                 res = session.get(url, timeout=15)
                 
                 if res.status_code == 200:
@@ -125,7 +152,7 @@ def fetch_set_data(set_id):
                 elif res.status_code in [429, 500, 502, 503, 504]:
                     print(f"[{set_id}] Server busy ({res.status_code}) on page {page}. Retrying in {backoff}s (Attempt {attempt}/{max_attempts})...")
                     time.sleep(backoff)
-                    backoff += 1.5  # Linear backoff
+                    backoff += 1.5
                 else:
                     print(f"[{set_id}] Permanent HTTP Error {res.status_code} on page {page}")
                     break
@@ -136,7 +163,7 @@ def fetch_set_data(set_id):
 
         if not response or response.status_code != 200:
             print(f"Aborting {set_id} at page {page}: Failed after {max_attempts} attempts.")
-            break
+            return
 
         data = response.json().get("data", [])
         if not data:
@@ -144,7 +171,7 @@ def fetch_set_data(set_id):
 
         cards.extend(data)
         page += 1
-        time.sleep(0.6)  # Healthy baseline pause between successful pages
+        time.sleep(0.6)
 
     cleaned_cards = []
     price_map = {}
@@ -154,6 +181,7 @@ def fetch_set_data(set_id):
         
         images = card.get("images", {})
         small_img = images.get("small", "")
+        large_img = images.get("large", "")  # <-- Included large image URL
 
         tcg = card.get("tcgplayer", {}).get("prices", {})
         market_price = None
@@ -166,7 +194,10 @@ def fetch_set_data(set_id):
             "id": card.get("id"),
             "name": card.get("name"),
             "number": card_num,
-            "images": {"small": small_img}
+            "images": {
+                "small": small_img,
+                "large": large_img
+            }
         })
 
         if market_price is not None:
@@ -179,15 +210,21 @@ def fetch_set_data(set_id):
     with open(f"{OUTPUT_DIR}/prices/{set_id}_prices.json", "w", encoding="utf-8") as f:
         json.dump(price_map, f, separators=(",", ":"))
 
+    # Record sync time in UTC and write to disk
+    tracker[set_id] = datetime.now(timezone.utc).isoformat()
+    save_sync_tracker(tracker)
+
     print(f"Saved {len(cleaned_cards)} cards and {len(price_map)} prices for {set_id}.")
 
 # 4. Main Execution
 if __name__ == "__main__":
+    sync_tracker = load_sync_tracker()
+
     # 1. Fetch all set IDs and save the manifest
     all_set_ids = fetch_all_sets()
     print(f"Discovered {len(all_set_ids)} total sets to download.")
 
-    # 2. Loop through EVERY set returned by the API
+    # 2. Loop through sets returned by the API
     for s_id in all_set_ids:
-        fetch_set_data(s_id)
+        fetch_set_data(s_id, sync_tracker)
         time.sleep(1)  # Courtesy delay between sets
