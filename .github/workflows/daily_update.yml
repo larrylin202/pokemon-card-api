@@ -1,44 +1,52 @@
-name: Daily Card & Price Update
+name: Daily Pokémon API & Price Sync
 
 on:
   schedule:
-    - cron: "0 4 * * *"
+    # Runs daily at 06:00 UTC
+    - cron: '0 6 * * *'
+  # Allows triggering the sync manually from the Actions tab
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
-  update-data:
+  sync:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
 
     steps:
-      - name: Checkout Repository
+      - name: Check out repository
         uses: actions/checkout@v4
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: '3.11'
+          cache: 'pip'
 
-      - name: Install Dependencies
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install requests
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; else pip install requests; fi
 
-      - name: Run Recent Sets Scraper
+      - name: Run daily update script
         env:
           POKEMON_TCG_API_KEY: ${{ secrets.POKEMON_TCG_API_KEY }}
         run: |
           python daily_update.py
 
-      - name: Commit and Push Changes
+      - name: Commit and push changes
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          
+          # Stage all generated files in api_data including the sync tracker
           git add api_data/
-          if git diff --staged --quiet; then
-            echo "No changes detected today."
+          
+          # Only commit and push if there are actual diffs
+          if git diff --cached --quiet; then
+            echo "No changes detected to commit."
           else
-            git commit -m "Automated daily card & price update [skip ci]"
+            git commit -m "Automated daily card & price sync [skip ci]"
             git push
           fi
