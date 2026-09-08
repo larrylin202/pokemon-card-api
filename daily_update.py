@@ -177,7 +177,7 @@ def fetch_set_data(set_id, tracker):
         card_num = card.get("number", "")
         images = card.get("images", {})
         small_img = images.get("small", "")
-        large_img = images.get("large", "")  # <-- Added
+        large_img = images.get("large", "")
 
         tcg = card.get("tcgplayer", {}).get("prices", {})
         market_price = None
@@ -192,7 +192,7 @@ def fetch_set_data(set_id, tracker):
             "number": card_num,
             "images": {
                 "small": small_img,
-                "large": large_img  # <-- Added
+                "large": large_img  
             }
         })
 
