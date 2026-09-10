@@ -1,4 +1,5 @@
 import os
+import sys
 import json
 import time
 import requests
@@ -9,7 +10,7 @@ API_KEY = os.getenv("POKEMON_TCG_API_KEY", "")
 BASE_URL = "https://api.pokemontcg.io/v2"
 OUTPUT_DIR = "api_data"
 TRACKER_FILE = f"{OUTPUT_DIR}/sync_tracker.json"
-CACHE_EXPIRY_HOURS = 24  # Force re-fetch after 24 hours
+CACHE_EXPIRY_HOURS = 24 * 30  # 30-day monthly cadence (720 hours)
 
 HEADERS = {
     "User-Agent": "PokemonCardScanner/1.0",
@@ -35,11 +36,14 @@ def save_sync_tracker(tracker):
     with open(TRACKER_FILE, "w", encoding="utf-8") as f:
         json.dump(tracker, f, indent=2)
 
-def is_set_stale(set_id, tracker):
+def is_set_stale(set_id, tracker, force=False):
+    if force:
+        return True
+
     price_file = f"{OUTPUT_DIR}/prices/{set_id}_prices.json"
     set_file = f"{OUTPUT_DIR}/sets/{set_id}.json"
 
-    # If the output files don't exist, it's definitely stale
+    # If the output files don't exist, it's stale
     if not (os.path.exists(price_file) and os.path.exists(set_file)):
         return True
 
@@ -86,7 +90,6 @@ def fetch_all_sets():
             time.sleep(backoff)
             backoff *= 1.5
 
-    # If the API gave us valid sets, write/update the local manifest
     if sets:
         manifest = [
             {
@@ -104,7 +107,6 @@ def fetch_all_sets():
         print(f"Successfully saved {len(manifest)} sets to manifest.")
         return [s["id"] for s in sets]
 
-    # Fallback: API failed, try loading the existing manifest already in the repo
     print("Warning: Failed to fetch fresh sets metadata. Attempting fallback to existing manifest...")
     if os.path.exists(manifest_path):
         try:
@@ -116,14 +118,13 @@ def fetch_all_sets():
         except Exception as e:
             print(f"Failed to parse cached manifest: {e}")
 
-    # Ultimate fallback if no cache exists yet
     print("No local manifest available. Falling back to default active sets.")
     return ["sv1", "sv2", "sv3", "sv3pt5", "sv4", "sv4pt5", "sv5", "sv6", "sv6pt5", "sv7", "sv8", "sv8pt5"]
 
 # 3. Fetch Cards & Prices for a Specific Set
-def fetch_set_data(set_id, tracker):
-    if not is_set_stale(set_id, tracker):
-        print(f"Skipping {set_id}: Updated within the last {CACHE_EXPIRY_HOURS} hours.")
+def fetch_set_data(set_id, tracker, force=False):
+    if not is_set_stale(set_id, tracker, force=force):
+        print(f"Skipping {set_id}: Updated within the last {CACHE_EXPIRY_HOURS // 24} days.")
         return
 
     print(f"Processing set: {set_id}...")
@@ -181,14 +182,19 @@ def fetch_set_data(set_id, tracker):
         
         images = card.get("images", {})
         small_img = images.get("small", "")
-        large_img = images.get("large", "")  # <-- Included large image URL
+        large_img = images.get("large", "")
 
         tcg = card.get("tcgplayer", {}).get("prices", {})
-        market_price = None
-        for variant in ["holofoil", "normal", "reverseHolofoil", "1stEditionHolofoil"]:
-            if variant in tcg and tcg[variant].get("market") is not None:
-                market_price = tcg[variant]["market"]
-                break
+        available_variants = []
+        card_prices = {}
+
+        # Scan for existing variants and their respective market prices
+        for variant in ["normal", "holofoil", "reverseHolofoil", "1stEditionHolofoil"]:
+            if variant in tcg:
+                available_variants.append(variant)
+                market_val = tcg[variant].get("market")
+                if market_val is not None:
+                    card_prices[variant] = market_val
 
         cleaned_cards.append({
             "id": card.get("id"),
@@ -197,11 +203,12 @@ def fetch_set_data(set_id, tracker):
             "images": {
                 "small": small_img,
                 "large": large_img
-            }
+            },
+            "availableVariants": available_variants
         })
 
-        if market_price is not None:
-            price_map[card_num] = market_price
+        if card_prices:
+            price_map[card_num] = card_prices
 
     # Write output files
     with open(f"{OUTPUT_DIR}/sets/{set_id}.json", "w", encoding="utf-8") as f:
@@ -214,17 +221,16 @@ def fetch_set_data(set_id, tracker):
     tracker[set_id] = datetime.now(timezone.utc).isoformat()
     save_sync_tracker(tracker)
 
-    print(f"Saved {len(cleaned_cards)} cards and {len(price_map)} prices for {set_id}.")
+    print(f"Saved {len(cleaned_cards)} cards and {len(price_map)} variant prices for {set_id}.")
 
 # 4. Main Execution
 if __name__ == "__main__":
+    force_sync = "--force" in sys.argv
     sync_tracker = load_sync_tracker()
 
-    # 1. Fetch all set IDs and save the manifest
     all_set_ids = fetch_all_sets()
     print(f"Discovered {len(all_set_ids)} total sets to download.")
 
-    # 2. Loop through sets returned by the API
     for s_id in all_set_ids:
-        fetch_set_data(s_id, sync_tracker)
-        time.sleep(1)  # Courtesy delay between sets
+        fetch_set_data(s_id, sync_tracker, force=force_sync)
+        time.sleep(1)
